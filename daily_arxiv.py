@@ -84,81 +84,63 @@ def get_code_link(qword:str) -> str:
         code_link = results["items"][0]["html_url"]
     return code_link
 
-def get_daily_papers(topic,query="slam", max_results=2):
+def get_daily_papers(topic, query="slam", max_results=2):
     """
     @param topic: str
     @param query: str
     @return paper_with_code: dict
     """
-    # output
     content = dict()
     content_to_web = dict()
     search_engine = arxiv.Search(
-        query = query,
-        max_results = max_results,
-        sort_by = arxiv.SortCriterion.SubmittedDate
+        query=query,
+        max_results=max_results,
+        sort_by=arxiv.SortCriterion.SubmittedDate
     )
 
     for result in search_engine.results():
+        paper_id = result.get_short_id()
+        paper_title = result.title
+        paper_url = result.entry_id
+        paper_abstract = result.summary.replace("\n", " ")
+        update_time = result.updated.date()
 
-        paper_id            = result.get_short_id()
-        paper_title         = result.title
-        paper_url           = result.entry_id
-        code_url            = base_url + paper_id #TODO
-        paper_abstract      = result.summary.replace("\n"," ")
-        paper_authors       = get_authors(result.authors)
-        paper_first_author  = get_authors(result.authors,first_author = True)
-        primary_category    = result.primary_category
-        publish_time        = result.published.date()
-        update_time         = result.updated.date()
-        comments            = result.comment
-
-        logging.info(f"Time = {update_time} title = {paper_title} author = {paper_first_author}")
-
-        # eg: 2108.09112v1 -> 2108.09112
         ver_pos = paper_id.find('v')
-        if ver_pos == -1:
-            paper_key = paper_id
-        else:
-            paper_key = paper_id[0:ver_pos]
+        paper_key = paper_id[:ver_pos] if ver_pos != -1 else paper_id
         paper_url = arxiv_url + 'abs/' + paper_key
 
+        repo_url = None
+
+        # 1. 优先检查paperswithcode官方链接
         try:
-            # source code link
-            r = requests.get(code_url).json()
-            repo_url = None
+            code_url = base_url + paper_id
+            r = requests.get(code_url, timeout=5).json()
             if "official" in r and r["official"]:
                 repo_url = r["official"]["url"]
-            # TODO: not found, two more chances
-            # else:
-            #    repo_url = get_code_link(paper_title)
-            #    if repo_url is None:
-            #        repo_url = get_code_link(paper_key)
-            if repo_url is not None:
-                content[paper_key] = "|**{}**|**{}**|{} et.al.|[{}]({})|**[link]({})**|\n".format(
-                       update_time,paper_title,paper_first_author,paper_key,paper_url,repo_url)
-                content_to_web[paper_key] = "- {}, **{}**, {} et.al., Paper: [{}]({}), Code: **[{}]({})**".format(
-                       update_time,paper_title,paper_first_author,paper_url,paper_url,repo_url,repo_url)
+        except:
+            pass
 
-            else:
-                content[paper_key] = "|**{}**|**{}**|{} et.al.|[{}]({})|null|\n".format(
-                       update_time,paper_title,paper_first_author,paper_key,paper_url)
-                content_to_web[paper_key] = "- {}, **{}**, {} et.al., Paper: [{}]({})".format(
-                       update_time,paper_title,paper_first_author,paper_url,paper_url)
+        # 2. 如果未找到，检查摘要中的网址（作为最后备选）
+        if repo_url is None:
+            url_match = re.search(r'https?://[^\s]+', paper_abstract)
+            if url_match:
+                repo_url = url_match.group(0)
 
-            # TODO: select useful comments
-            comments = None
-            if comments != None:
-                content_to_web[paper_key] += f", {comments}\n"
-            else:
-                content_to_web[paper_key] += f"\n"
+        # 生成Markdown内容
+        abstract_html = f"<details><summary>Show Abstract</summary><p>{paper_abstract}</p></details>"
 
-        except Exception as e:
-            logging.error(f"exception: {e} with id: {paper_key}")
+        if repo_url is not None:
+            content[paper_key] = "|**{}**|**{}**|{}|[{}]({})|**[link]({})**|\n".format(
+                update_time, paper_title, abstract_html, paper_key, paper_url, repo_url)
+            content_to_web[paper_key] = "- {}, **{}**, Paper: [{}]({}), Code: **[{}]({})**".format(
+                update_time, paper_title, paper_url, paper_url, repo_url, repo_url)
+        else:
+            content[paper_key] = "|**{}**|**{}**|{}|[{}]({})|null|\n".format(
+                update_time, paper_title, abstract_html, paper_key, paper_url)
+            content_to_web[paper_key] = "- {}, **{}**, Paper: [{}]({})".format(
+                update_time, paper_title, paper_url, paper_url)
 
-    data = {topic:content}
-    data_web = {topic:content_to_web}
-    return data,data_web
+    return {topic: content}, {topic: content_to_web}
 
 def update_paper_links(filename):
     '''
