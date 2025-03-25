@@ -143,58 +143,81 @@ def get_daily_papers(topic, query="slam", max_results=2):
     return {topic: content}, {topic: content_to_web}
 
 def update_paper_links(filename):
-    '''
-    weekly update paper links in json file
-    '''
+    """更新JSON文件中论文的代码链接（与get_daily_papers逻辑同步）"""
+    def extract_url_from_text(text):
+        """从文本中提取第一个https/http网址"""
+        match = re.search(r'https?://[^\s]+', text)
+        return match.group(0) if match else None
+
     def parse_arxiv_string(s):
-        parts = s.split("|")
-        date = parts[1].strip()
-        title = parts[2].strip()
-        authors = parts[3].strip()
-        arxiv_id = parts[4].strip()
-        code = parts[5].strip()
-        arxiv_id = re.sub(r'v\d+', '', arxiv_id)
-        return date,title,authors,arxiv_id,code
+        """解析arxiv条目字符串"""
+        parts = [p.strip() for p in s.split("|") if p.strip()]
+        if len(parts) < 5:
+            raise ValueError(f"Invalid format: {s}")
+        
+        return {
+            'date': parts[1],
+            'title': parts[2].replace("**", ""),
+            'authors': parts[3],
+            'arxiv_id': parts[4],
+            'code': parts[5] if len(parts) > 5 else "null"
+        }
 
-    with open(filename,"r") as f:
-        content = f.read()
-        if not content:
-            m = {}
-        else:
-            m = json.loads(content)
+    with open(filename, "r+") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            logging.error("Invalid JSON file")
+            return
 
-        json_data = m.copy()
-
-        for keywords,v in json_data.items():
-            logging.info(f'keywords = {keywords}')
-            for paper_id,contents in v.items():
-                contents = str(contents)
-
-                update_time, paper_title, paper_first_author, paper_url, code_url = parse_arxiv_string(contents)
-
-                contents = "|{}|{}|{}|{}|{}|\n".format(update_time,paper_title,paper_first_author,paper_url,code_url)
-                json_data[keywords][paper_id] = str(contents)
-                logging.info(f'paper_id = {paper_id}, contents = {contents}')
-
-                valid_link = False if '|null|' in contents else True
-                if valid_link:
-                    continue
+        for keyword in list(data.keys()):
+            for paper_id in list(data[keyword].keys()):
+                entry = data[keyword][paper_id]
+                
                 try:
-                    code_url = base_url + paper_id #TODO
-                    r = requests.get(code_url).json()
+                    # 解析现有条目
+                    parsed = parse_arxiv_string(entry)
+                    current_code = parsed['code']
+                    
+                    # 如果已有有效链接则跳过
+                    if current_code != "null":
+                        continue
+                        
+                    # 三级链接检查逻辑（与get_daily_papers同步）
                     repo_url = None
-                    if "official" in r and r["official"]:
-                        repo_url = r["official"]["url"]
-                        if repo_url is not None:
-                            new_cont = contents.replace('|null|',f'|**[link]({repo_url})**|')
-                            logging.info(f'ID = {paper_id}, contents = {new_cont}')
-                            json_data[keywords][paper_id] = str(new_cont)
-
+                    
+                    # 1. 检查paperswithcode官方API
+                    try:
+                        api_url = f"{base_url}{paper_id}"
+                        resp = requests.get(api_url, timeout=5).json()
+                        if resp.get("official"):
+                            repo_url = resp["official"]["url"]
+                    except:
+                        pass
+                    
+                    # 2. 检查摘要中的网址（需要获取原始摘要）
+                    if repo_url is None:
+                        try:
+                            paper = next(arxiv.Search(id_list=[paper_id]).results())
+                            abstract = paper.summary.replace("\n", " ")
+                            repo_url = extract_url_from_text(abstract)
+                        except:
+                            pass
+                    
+                    # 3. 更新条目（如果找到新链接）
+                    if repo_url:
+                        new_entry = entry.replace("|null|", f"|**[link]({repo_url})**|")
+                        data[keyword][paper_id] = new_entry
+                        logging.info(f"Updated {paper_id}: {repo_url}")
+                        
                 except Exception as e:
-                    logging.error(f"exception: {e} with id: {paper_id}")
-        # dump to json file
-        with open(filename,"w") as f:
-            json.dump(json_data,f)
+                    logging.warning(f"Failed to process {paper_id}: {str(e)}")
+                    continue
+
+        # 写回文件
+        f.seek(0)
+        json.dump(data, f, indent=2)
+        f.truncate()
 
 def update_json_file(filename,data_dict):
     '''
